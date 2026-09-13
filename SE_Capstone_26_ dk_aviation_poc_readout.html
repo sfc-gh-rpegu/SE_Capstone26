@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="snowflake-source" content="cortex-agent-authored" />
+<title>DK Aviation — Snowflake POC ReadOut</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-09-13",
+  "intent": "SE Capstone POC ReadOut — DK Aviation ADS-B pipeline on Snowflake",
+  "dataSources": [
+    { "type": "query", "sql": "SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY WHERE WAREHOUSE_NAME LIKE '%CAPSTONE%'" },
+    { "type": "query", "sql": "SELECT COUNT(*) FROM CAPSTONE26_DB.RAW.ADSB_RAW_KAPA" },
+    { "type": "query", "sql": "SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY WHERE DATABASE_NAME = 'CAPSTONE26_DB'" }
+  ],
+  "sections": [
+    { "id": "s0", "title": "Title" },
+    { "id": "s1", "title": "Executive Summary" },
+    { "id": "s2", "title": "Problem & Requirements" },
+    { "id": "s3", "title": "Snowflake Concepts" },
+    { "id": "s4", "title": "Data Sources" },
+    { "id": "s5", "title": "Architecture" },
+    { "id": "s6", "title": "Stream+Task vs Dynamic Table" },
+    { "id": "s7", "title": "Demo & Results" },
+    { "id": "s8", "title": "Consumption & Cost" },
+    { "id": "s9", "title": "Value & Next Steps" }
+  ]
+}
+</script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'SF Pro Display', -apple-system, system-ui, 'Segoe UI', sans-serif;
+    display: flex; height: 100vh; overflow: hidden; font-size: 15px;
+    color: light-dark(#1e293b, #e2e8f0);
+    background: light-dark(#f8fafc, #0f172a);
+    line-height: 1.55;
+  }
+  /* sidebar */
+  .sidebar { width: 240px; min-width: 240px; background: #0b1220; color: #e2e8f0; display: flex; flex-direction: column; }
+  .sb-head { padding: 22px 18px 14px; border-bottom: 1px solid rgba(255,255,255,.08); }
+  .sb-head .logo { color: #29B5E8; font-weight: 800; letter-spacing: .5px; font-size: .78rem; }
+  .sb-head h1 { font-size: 1.02rem; margin-top: 6px; font-weight: 700; }
+  .sb-head p { font-size: .72rem; color: #94a3b8; margin-top: 3px; }
+  nav ul { list-style: none; padding: 10px 0; overflow-y: auto; }
+  nav li { padding: 9px 18px; font-size: .84rem; color: #cbd5e1; cursor: pointer; border-left: 3px solid transparent; }
+  nav li:hover { background: rgba(41,181,232,.12); color: #fff; }
+  nav li.active { background: rgba(41,181,232,.18); border-left-color: #29B5E8; color: #fff; font-weight: 600; }
+  nav li .num { color: #64748b; margin-right: 8px; font-size: .72rem; }
+  .sb-foot { margin-top: auto; padding: 14px 18px; font-size: .68rem; color: #64748b; border-top: 1px solid rgba(255,255,255,.08); }
+  /* main */
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .stage { flex: 1; padding: 34px 46px; overflow-y: auto; }
+  .slide { display: none; max-width: 1000px; }
+  .slide.active { display: block; animation: fade .18s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  h2 { font-size: 1.6rem; font-weight: 700; color: light-dark(#0f172a, #f1f5f9); padding-bottom: 10px; border-bottom: 3px solid #29B5E8; display: inline-block; margin-bottom: 20px; }
+  h3 { font-size: .96rem; font-weight: 700; margin: 20px 0 8px; color: light-dark(#0f172a, #f1f5f9); }
+  p { margin-bottom: 10px; }
+  ul, ol { margin: 0 0 6px 20px; }
+  li { margin-bottom: 5px; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: .82em; background: light-dark(#e8eef5, #1e293b); padding: 1px 5px; border-radius: 4px; }
+  strong { color: light-dark(#0f172a, #f1f5f9); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .card { background: light-dark(#fff, #16233a); border: 1px solid light-dark(#e2e8f0, #24344f); border-radius: 10px; padding: 16px 18px; }
+  .card h3 { margin-top: 0; color: #1a7fa8; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  .kpi { background: light-dark(#fff, #16233a); border: 1px solid light-dark(#e2e8f0, #24344f); border-top: 3px solid #29B5E8; border-radius: 10px; padding: 14px; text-align: center; }
+  .kpi.acc { border-top-color: #10b981; }
+  .kpi b { display: block; font-size: 1.5rem; font-weight: 800; color: light-dark(#0f172a, #f1f5f9); }
+  .kpi span { display: block; font-size: .72rem; text-transform: uppercase; letter-spacing: .5px; color: light-dark(#64748b, #94a3b8); margin-top: 3px; }
+  .callout { background: light-dark(#eaf6fc, rgba(41,181,232,.1)); border-left: 4px solid #29B5E8; padding: 13px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; font-size: .92rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; margin-top: 6px; }
+  th { background: light-dark(#0f172a, #020617); color: #fff; text-align: left; padding: 9px 12px; font-size: .74rem; text-transform: uppercase; letter-spacing: .4px; }
+  td { padding: 8px 12px; border-bottom: 1px solid light-dark(#e2e8f0, #24344f); }
+  tr.tot td { background: light-dark(#eaf6fc, rgba(41,181,232,.12)); font-weight: 700; }
+  /* side-by-side comparison table */
+  .cmp th:nth-child(2) { border-bottom: 3px solid #f59e0b; }
+  .cmp th:nth-child(3) { border-bottom: 3px solid #10b981; }
+  .cmp td:first-child { background: light-dark(#f1f5f9, #16233a); }
+  .cmp td:nth-child(3) { background: light-dark(#f0fdf7, rgba(16,185,129,.07)); }
+  .pick { display: inline-block; background: #10b981; color: #fff; font-size: .6rem; padding: 1px 7px; border-radius: 20px; margin-left: 6px; letter-spacing: .5px; vertical-align: middle; }
+  /* inline SVG diagram — self-contained, no external image */
+  .wb { margin: 10px 0 16px; }
+  .wb svg { width: 100%; height: auto; max-height: 50vh; display: block; background: light-dark(#fff, #16233a); border: 1px solid light-dark(#e2e8f0, #24344f); border-radius: 10px; padding: 6px; }
+  .wb figcaption { font-size: .72rem; color: light-dark(#64748b, #94a3b8); margin-top: 6px; text-align: center; }
+  /* svg primitives */
+  .wb .bx { fill: none; stroke: light-dark(#334155, #94a3b8); stroke-width: 1.6; }
+  .wb .bx-g { stroke: #10b981; stroke-width: 2; }
+  .wb .gate { fill: none; stroke: light-dark(#94a3b8, #64748b); stroke-width: 1.2; }
+  .wb .lead, .wb .brace { fill: none; stroke: light-dark(#94a3b8, #64748b); stroke-width: 1.2; }
+  .wb .arw { stroke: #334155; stroke-width: 1.6; }
+  .wb .divide { stroke: light-dark(#cbd5e1, #334155); stroke-width: 1.2; stroke-dasharray: 5 6; }
+  .wb .rule { stroke: light-dark(#334155, #94a3b8); stroke-width: 2; }
+  .wb .rule-a { stroke: #f59e0b; stroke-width: 2.5; }
+  .wb .rule-b { stroke: #29B5E8; stroke-width: 2.5; }
+  .wb .rule-h { stroke: light-dark(#94a3b8, #64748b); stroke-width: 1; }
+  .wb .pill { fill: none; stroke: light-dark(#334155, #94a3b8); stroke-width: 1.6; }
+  .wb .pill-g { stroke: #10b981; stroke-width: 2; }
+  /* svg text */
+  .wb text { font-family: inherit; fill: light-dark(#1e293b, #e2e8f0); }
+  .wb .t-title { font-size: 21px; font-weight: 700; text-anchor: middle; }
+  .wb .t-opt { font-size: 14px; font-weight: 700; letter-spacing: .6px; }
+  .wb .t-bx { font-size: 12.5px; font-weight: 600; text-anchor: middle; }
+  .wb .t-sub { font-size: 10.5px; text-anchor: middle; fill: light-dark(#64748b, #94a3b8); }
+  .wb .t-mono { font-family: ui-monospace, Menlo, monospace; font-size: 11px; text-anchor: middle; fill: light-dark(#475569, #94a3b8); }
+  .wb .t-gate { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; text-anchor: middle; fill: light-dark(#475569, #94a3b8); }
+  .wb .t-count { font-size: 13px; font-weight: 600; text-anchor: middle; }
+  .wb .t-li { font-size: 12.5px; }
+  .wb .t-pro { font-size: 15px; font-weight: 700; fill: #10b981; }
+  .wb .t-con { font-size: 15px; font-weight: 700; fill: #f59e0b; }
+  .wb .t-tick { font-size: 11px; fill: #10b981; }
+  .wb .t-hint-h { font-size: 10.5px; font-style: italic; fill: light-dark(#64748b, #94a3b8); }
+  .wb .t-hint { font-size: 11px; fill: light-dark(#475569, #94a3b8); }
+  .wb .t-pill { font-size: 12px; font-weight: 700; text-anchor: middle; }
+  .wb .t-pill-g { font-size: 12.5px; font-weight: 700; text-anchor: middle; fill: #0d9668; }
+  .wb .t-pill-s { font-size: 10px; text-anchor: middle; fill: light-dark(#64748b, #94a3b8); }
+  .wb .t-star { font-size: 15px; fill: #f59e0b; }
+  /* architecture-specific */
+  .wb .band { fill: light-dark(#f8fafc, rgba(148,163,184,.06)); stroke: light-dark(#e2e8f0, #24344f); stroke-width: 1.2; }
+  .wb .t-band { font-size: 10.5px; font-weight: 700; letter-spacing: 2px; text-anchor: middle; fill: light-dark(#94a3b8, #64748b); }
+  .wb .edge { stroke: light-dark(#cbd5e1, #334155); stroke-width: 1; stroke-dasharray: 4 4; }
+  .wb .t-edge { font-size: 9.5px; font-style: italic; fill: light-dark(#94a3b8, #64748b); }
+  .wb .t-edgelbl { font-size: 9.5px; text-anchor: middle; fill: light-dark(#64748b, #94a3b8); }
+  .wb .t-note { font-size: 10.5px; font-weight: 600; fill: light-dark(#475569, #cbd5e1); }
+  .wb .t-mono2 { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: light-dark(#64748b, #94a3b8); }
+  .wb .t-sub2 { font-size: 9.5px; font-style: italic; fill: light-dark(#94a3b8, #64748b); }
+  .wb .bx-b { stroke: #29B5E8; stroke-width: 2; }
+  .wb .bx-p { stroke: #8b5cf6; stroke-width: 2; }
+  .wb .bx-d { stroke: light-dark(#94a3b8, #64748b); stroke-width: 1.4; stroke-dasharray: 5 4; }
+  .wb .dash { stroke: light-dark(#cbd5e1, #475569); stroke-width: 1.2; stroke-dasharray: 3 3; }
+  .pro::marker { color: #10b981; } .con::marker { color: #f59e0b; }
+  .bar { display: flex; height: 26px; border-radius: 6px; overflow: hidden; margin: 12px 0 6px; font-size: .68rem; color: #fff; }
+  .bar div { display: flex; align-items: center; justify-content: center; }
+  /* controls */
+  .ctrl { display: flex; align-items: center; justify-content: space-between; padding: 12px 46px; border-top: 1px solid light-dark(#e2e8f0, #24344f); background: light-dark(#fff, #0b1220); }
+  button { background: #29B5E8; color: #fff; border: 0; padding: 8px 20px; border-radius: 7px; font-size: .84rem; font-weight: 600; cursor: pointer; }
+  button:disabled { background: light-dark(#cbd5e1, #334155); cursor: not-allowed; }
+  #counter { font-size: .8rem; color: light-dark(#64748b, #94a3b8); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="sb-head">
+    <div class="logo">❄ SNOWFLAKE</div>
+    <h1>DK Aviation POC ReadOut</h1>
+    <p>SE Capstone 2026 · Ranjeeta Pegu</p>
+  </div>
+  <nav><ul id="navList">
+    <li data-slide="0" class="active"><span class="num">—</span>Title</li>
+    <li data-slide="1"><span class="num">01</span>Executive Summary</li>
+    <li data-slide="2"><span class="num">02</span>Problem &amp; Requirements</li>
+    <li data-slide="3"><span class="num">03</span>Snowflake Concepts</li>
+    <li data-slide="4"><span class="num">04</span>Data Sources</li>
+    <li data-slide="5"><span class="num">05</span>Architecture</li>
+    <li data-slide="6"><span class="num">06</span>Ingestion Options</li>
+    <li data-slide="7"><span class="num">07</span>Demo &amp; Results</li>
+    <li data-slide="8"><span class="num">08</span>Consumption &amp; Cost</li>
+    <li data-slide="9"><span class="num">09</span>Value &amp; Next Steps</li>
+  </ul></nav>
+  <div class="sb-foot">Click a section, or use ← → keys</div>
+</div>
+
+<div class="main">
+<div class="stage">
+
+<!-- 0 TITLE -->
+<div class="slide active" id="s0">
+  <div style="padding:60px 0;">
+    <div style="color:#29B5E8;font-weight:800;letter-spacing:1.5px;font-size:.8rem;">POC READOUT · EXECUTIVE PANEL</div>
+    <h2 style="font-size:2.4rem;border:0;margin:14px 0 6px;display:block;">DK Aviation on Snowflake</h2>
+    <p style="font-size:1.1rem;color:light-dark(#475569,#94a3b8);max-width:640px;">
+      Near-real-time ADS-B flight data pipeline — 469M records from two ground stations,
+      unified and enriched with FAA registration data for <strong>$32.65</strong> total POC cost.
+    </p>
+    <div class="kpis" style="margin-top:34px;">
+      <div class="kpi"><b>469M</b><span>Records Ingested</span></div>
+      <div class="kpi"><b>10 min</b><span>Data Freshness</span></div>
+      <div class="kpi"><b>316K</b><span>FAA Registrations</span></div>
+      <div class="kpi acc"><b>~$25/mo</b><span>Production Run Rate</span></div>
+    </div>
+    <p style="margin-top:34px;font-size:.85rem;color:light-dark(#64748b,#94a3b8);">
+      Ranjeeta Pegu · Sales Engineer · ranjeeta.pegu@snowflake.com · September 2026
+    </p>
+  </div>
+</div>
+
+<!-- 1 EXEC SUMMARY -->
+<div class="slide" id="s1">
+  <h2>Executive Summary</h2>
+  <div class="kpis">
+    <div class="kpi"><b>468M</b><span>KAPA rows</span></div>
+    <div class="kpi"><b>696K</b><span>KBFI rows</span></div>
+    <div class="kpi"><b>509M</b><span>Conformed rows</span></div>
+    <div class="kpi acc"><b>$32.65</b><span>Total POC cost</span></div>
+  </div>
+  <div class="callout">
+    <strong>Outcome:</strong> Built and validated an end-to-end, event-driven ADS-B pipeline on Snowflake.
+    Two firmware formats normalised into one model, enriched with FAA data, 15-minute SLA met.
+    <strong>Recommendation: Dynamic Tables</strong> — same SLA, 4 objects reduced to 1.
+  </div>
+  <h3>What was delivered</h3>
+  <ul>
+    <li><strong>Automated ingest</strong> — Snowpipe fires on S3 events; no scheduling, no polling</li>
+    <li><strong>Schema unification</strong> — flat JSON (KAPA) + nested array JSON (KBFI) into one conformed table</li>
+    <li><strong>FAA enrichment</strong> — owner, manufacturer and model on every flight record</li>
+    <li><strong>Full traceability</strong> — every row carries source file name and row number</li>
+    <li><strong>Audit-ready access</strong> — read-only views on a dedicated XSmall warehouse and role</li>
+  </ul>
+</div>
+
+<!-- 2 PROBLEM -->
+<div class="slide" id="s2">
+  <h2>Problem &amp; Requirements</h2>
+  <p>DK Aviation runs two ADS-B ground stations on <strong>different firmware</strong>. They needed one queryable,
+  enriched, near-real-time dataset with audit traceability — without standing up infrastructure.</p>
+  <div class="grid2">
+    <div class="card">
+      <h3>Technical requirements</h3>
+      <ul>
+        <li>Event-driven ingest from S3</li>
+        <li>Two JSON schemas — flat vs nested array</li>
+        <li>15-minute freshness SLA</li>
+        <li>Source file + row number on every record</li>
+        <li>Join to FAA registration data</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Business requirements</h3>
+      <ul>
+        <li>One unified view across stations</li>
+        <li>Answer "who owns this aircraft, what model?"</li>
+        <li>Audit-ready lineage</li>
+        <li>Minimal warehouse spend</li>
+        <li>Near-zero operational overhead</li>
+      </ul>
+    </div>
+  </div>
+  <h3>Challenges hit — and how they were solved</h3>
+  <table>
+    <thead><tr><th>Challenge</th><th>Resolution</th></tr></thead>
+    <tbody>
+      <tr><td>KBFI nests aircraft in an array; KAPA is flat</td><td><code>LATERAL FLATTEN</code> to explode array to one row per aircraft</td></tr>
+      <tr><td>~469M records across 200K+ files</td><td>Medium warehouse for one-time backfill, Small for steady state</td></tr>
+      <tr><td>Two S3 path conventions (Hive-style vs date folders)</td><td>Separate stages/pipes per station, converge at conformed layer</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- 3 CONCEPTS -->
+<div class="slide" id="s3">
+  <h2>The Snowflake Concepts That Made This Work</h2>
+  <p>Six features carry the entire solution — no external tooling, no servers.</p>
+  <div class="grid3">
+    <div class="card"><h3>Snowpipe</h3><p>Event-driven auto-ingest. An S3 → SQS notification triggers the load the moment a file lands. Serverless, billed per file.</p></div>
+    <div class="card"><h3>VARIANT + FLATTEN</h3><p>Store raw JSON natively with no load-time schema; <code>LATERAL FLATTEN</code> unnests arrays at query time. This is what absorbs the two firmware formats.</p></div>
+    <div class="card"><h3>Dynamic Tables</h3><p>The whole pipeline in one <code>CREATE</code>: define the SQL, set <code>TARGET_LAG = 10 min</code>, Snowflake owns scheduling, incremental refresh and state.</p></div>
+    <div class="card"><h3>Streams + Tasks</h3><p>The imperative alternative — CDC on a table plus scheduled SQL, gated on <code>SYSTEM$STREAM_HAS_DATA</code>. More control, more objects.</p></div>
+    <div class="card"><h3>METADATA$ columns</h3><p><code>METADATA$FILENAME</code> and <code>METADATA$FILE_ROW_NUMBER</code> deliver the traceability requirement with zero custom code.</p></div>
+    <div class="card"><h3>Stages &amp; External Tables</h3><p>A Storage Integration gives secure IAM access to S3; external tables query the bucket in place with partition pruning, no copy.</p></div>
+  </div>
+  <div class="callout"><strong>Why it matters:</strong> every requirement maps to a managed platform feature. There is no ETL server, scheduler, or CDC tool to operate.</div>
+</div>
+
+<!-- 4 DATA SOURCES -->
+<div class="slide" id="s4">
+  <h2>Data Sources</h2>
+  <h3>1 · ADS-B flight data — customer S3 bucket <code>s3://capstone-rpegu/</code></h3>
+  <table>
+    <thead><tr><th>Station</th><th>Format</th><th>Path</th><th>Date range</th><th>Rows</th></tr></thead>
+    <tbody>
+      <tr><td><strong>KAPA-0001</strong><br/><small>newer firmware</small></td><td>Gzipped JSON, one record per line — flat (<code>hexid, ident, lat, lon, clock</code>)</td><td><code>kapa-0001/year=/month=/day=/</code></td><td>Dec 2021 – Jun 2025</td><td>468,291,036</td></tr>
+      <tr><td><strong>KBFI-0001</strong><br/><small>older firmware</small></td><td>Plain JSON, one object per file — nested <code>aircraft[]</code> array</td><td><code>kbfi-0001/YYYY/MM/DD/</code></td><td>Mar – Nov 2021</td><td>695,664 <small>(post-FLATTEN)</small></td></tr>
+    </tbody>
+  </table>
+  <h3>2 · FAA reference data — monthly public registry download</h3>
+  <table>
+    <thead><tr><th>Table</th><th>Rows</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr class="tot"><td>FAA_MASTER</td><td>316,402</td><td>Registration — N-number, owner, ICAO hex <em>(the join key)</em></td></tr>
+      <tr><td>FAA_ACFTREF</td><td>94,025</td><td>Manufacturer and model lookup</td></tr>
+      <tr><td>FAA_ENGINE</td><td>4,751</td><td>Engine type lookup</td></tr>
+      <tr><td>FAA_DEREG + 3 more</td><td>546K+</td><td>Deregistrations, dealers, reserved N-numbers</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><strong>Enrichment key:</strong> every ADS-B report carries a globally unique ICAO hex — joined to <code>FAA_MASTER.MODE_S_CODE_HEX</code> to resolve owner, make and model. Refresh cost: <strong>~$1.50/month</strong>.</div>
+</div>
+
+<!-- 5 ARCHITECTURE -->
+<div class="slide" id="s5">
+  <h2>Architecture &#8212; Ingest, Transform, Serve</h2>
+
+  <figure class="wb">
+    <svg viewBox="0 0 1040 400" role="img" aria-label="Three-layer architecture: S3 ingested by Snowpipe into RAW, transformed by a Dynamic Table into CONFORMED with FAA enrichment, served through audit views">
+      <title>DK Aviation on Snowflake &#8212; end-to-end architecture</title>
+      <defs>
+        <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+        </marker>
+      </defs>
+
+      <!-- ===== layer bands ===== -->
+      <rect class="band" x="20" y="58" width="236" height="232" rx="10"/>
+      <text class="t-band" x="138" y="80">INGEST</text>
+
+      <rect class="band" x="272" y="58" width="470" height="232" rx="10"/>
+      <text class="t-band" x="507" y="80">TRANSFORM</text>
+
+      <rect class="band" x="758" y="58" width="262" height="232" rx="10"/>
+      <text class="t-band" x="889" y="80">SERVE</text>
+
+      <!-- boundary marker -->
+      <text class="t-edge" x="20" y="44">customer AWS</text>
+      <line class="edge" x1="20" y1="50" x2="256" y2="50"/>
+      <text class="t-edge" x="272" y="44">Snowflake &#8212; CAPSTONE26_DB</text>
+      <line class="edge" x1="272" y1="50" x2="1020" y2="50"/>
+
+      <!-- ===== INGEST ===== -->
+      <rect class="bx" x="38" y="104" width="90" height="58" rx="7"/>
+      <text class="t-bx" x="83" y="128">S3</text>
+      <text class="t-sub" x="83" y="145">JSON / gzip</text>
+
+      <line class="arw" x1="132" y1="133" x2="156" y2="133" marker-end="url(#ah2)"/>
+      <text class="t-edgelbl" x="144" y="122">SQS</text>
+
+      <rect class="bx bx-b" x="160" y="104" width="82" height="58" rx="7"/>
+      <text class="t-bx" x="201" y="128">Snowpipe</text>
+      <text class="t-sub" x="201" y="145">&#215;2, auto</text>
+
+      <text class="t-note" x="38" y="196">Storage Integration</text>
+      <text class="t-mono2" x="38" y="212">INTG_S3_CAPSTONE</text>
+      <text class="t-note" x="38" y="236">External Stage</text>
+      <text class="t-mono2" x="38" y="252">CAPSTONE_S3_STAGE</text>
+      <text class="t-sub2" x="38" y="274">IAM role &#183; no data copied</text>
+
+      <!-- ingest to raw -->
+      <line class="arw" x1="246" y1="133" x2="290" y2="133" marker-end="url(#ah2)"/>
+
+      <!-- ===== TRANSFORM ===== -->
+      <rect class="bx" x="294" y="100" width="118" height="66" rx="7"/>
+      <text class="t-bx" x="353" y="122">RAW</text>
+      <text class="t-sub" x="353" y="138">KAPA 468M</text>
+      <text class="t-sub" x="353" y="153">KBFI 696K</text>
+      <text class="t-mono2" x="353" y="182" text-anchor="middle">VARIANT</text>
+
+      <line class="arw" x1="416" y1="133" x2="472" y2="133" marker-end="url(#ah2)"/>
+      <text class="t-edgelbl" x="444" y="122">FLATTEN</text>
+
+      <rect class="bx bx-g" x="476" y="94" width="146" height="78" rx="9"/>
+      <text class="t-bx" x="549" y="118">Dynamic Table</text>
+      <text class="t-mono" x="549" y="137">TARGET_LAG 10 min</text>
+      <text class="t-sub" x="549" y="156">incremental refresh</text>
+
+      <line class="arw" x1="626" y1="133" x2="654" y2="133" marker-end="url(#ah2)"/>
+
+      <rect class="bx bx-g" x="658" y="100" width="76" height="66" rx="7"/>
+      <text class="t-bx" x="696" y="122">CONFORMED</text>
+      <text class="t-sub" x="696" y="139">509M rows</text>
+      <text class="t-sub" x="696" y="154">enriched</text>
+
+      <!-- FAA enrichment feeding the join -->
+      <rect class="bx bx-p" x="440" y="228" width="180" height="50" rx="7"/>
+      <text class="t-bx" x="530" y="249">FAA Reference</text>
+      <text class="t-sub" x="530" y="265">316K registrations &#183; monthly</text>
+      <path class="arw" d="M 530 226 L 530 200 L 549 178" marker-end="url(#ah2)"/>
+      <text class="t-edgelbl" x="566" y="205">join on ICAO hex</text>
+
+      <!-- ===== SERVE ===== -->
+      <line class="arw" x1="738" y1="133" x2="776" y2="133" marker-end="url(#ah2)"/>
+
+      <rect class="bx" x="780" y="94" width="220" height="46" rx="7"/>
+      <text class="t-bx" x="890" y="113">AIRCRAFT_FLIGHT_DT_VW</text>
+      <text class="t-sub" x="890" y="130">enriched flight data</text>
+
+      <rect class="bx" x="780" y="148" width="220" height="46" rx="7"/>
+      <text class="t-bx" x="890" y="167">ADS_B_*_EXT_VW</text>
+      <text class="t-sub" x="890" y="184">external tables &#8212; S3 in place</text>
+
+      <rect class="bx bx-d" x="780" y="216" width="220" height="58" rx="7"/>
+      <text class="t-bx" x="890" y="238">CAPSTONE_AUDIT_ROLE</text>
+      <text class="t-sub" x="890" y="255">AUDIT_WH (XS) &#183; read-only</text>
+      <text class="t-sub" x="890" y="268">FILE_NAME + FILE_ROW_NUM</text>
+      <line class="dash" x1="890" y1="196" x2="890" y2="214"/>
+
+      <!-- ===== schemas + warehouses footer ===== -->
+      <line class="rule-h" x1="20" y1="312" x2="1020" y2="312"/>
+      <text class="t-hint-h" x="20" y="334">schemas</text>
+      <text class="t-hint" x="20" y="352">PROD stage &#183; RAW ingest &#183; STAGING conformed &#183; AUDIT serve</text>
+      <text class="t-hint-h" x="20" y="376">warehouses</text>
+      <text class="t-hint" x="20" y="394">LOAD_WH (M) one-time backfill &#183; QUERY_WH (S) pipeline &#183; AUDIT_WH (XS) read-only</text>
+
+      <rect class="pill pill-g" x="640" y="326" width="380" height="52" rx="8"/>
+      <text class="t-pill-g" x="830" y="346">6 objects, zero servers</text>
+      <text class="t-pill-s" x="830" y="364">2 pipes &#183; 1 dynamic table &#183; 4 views &#183; 3 warehouses</text>
+    </svg>
+    <figcaption>S3 lands files &#8594; Snowpipe ingests on event &#8594; Dynamic Table conforms and enriches &#8594; views serve auditors.</figcaption>
+  </figure>
+
+  <div class="callout">
+    <strong>The whole pipeline is six objects and no infrastructure.</strong> Data never leaves the customer's S3 until
+    Snowpipe pulls it; the conformed layer is one declarative Dynamic Table; auditors get read-only views on their own
+    XSmall warehouse, so their queries can never contend with ingestion.
+  </div>
+</div>
+
+<!-- 6 PIPELINE -->
+<div class="slide" id="s6">
+  <h2>Ingestion: Two Options, Compared</h2>
+
+  <figure class="wb">
+    <svg viewBox="0 0 1040 470" role="img" aria-label="Comparison of Stream plus Task versus Dynamic Table for building the conformed layer">
+      <title>RAW to CONFORMED — two ways</title>
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+        </marker>
+      </defs>
+
+      <!-- header -->
+      <text class="t-title" x="520" y="30">RAW &#8594; CONFORMED : two ways</text>
+      <line class="rule" x1="330" y1="42" x2="710" y2="42"/>
+
+      <!-- divider -->
+      <line class="divide" x1="520" y1="60" x2="520" y2="400"/>
+
+      <!-- ============ OPTION A ============ -->
+      <text class="t-opt" x="30" y="80">OPTION A &#183; STREAM + TASK</text>
+      <line class="rule-a" x1="30" y1="90" x2="330" y2="90"/>
+
+      <!-- gate callout -->
+      <rect class="gate" x="150" y="108" width="230" height="26" rx="6"/>
+      <text class="t-gate" x="265" y="125">IF SYSTEM$STREAM_HAS_DATA</text>
+      <path class="lead" d="M 250 134 L 244 148"/>
+
+      <rect class="bx" x="26" y="152" width="86" height="52" rx="7"/>
+      <text class="t-bx" x="69" y="175">RAW</text>
+      <text class="t-bx" x="69" y="192">TABLE</text>
+
+      <line class="arw" x1="116" y1="178" x2="140" y2="178" marker-end="url(#ah)"/>
+
+      <rect class="bx" x="144" y="152" width="92" height="52" rx="7"/>
+      <text class="t-bx" x="190" y="175">STREAM</text>
+      <text class="t-sub" x="190" y="192">(CDC)</text>
+
+      <line class="arw" x1="240" y1="178" x2="264" y2="178" marker-end="url(#ah)"/>
+
+      <rect class="bx" x="268" y="152" width="92" height="52" rx="7"/>
+      <text class="t-bx" x="314" y="175">TASK</text>
+      <text class="t-sub" x="314" y="192">every 5 min</text>
+
+      <line class="arw" x1="364" y1="178" x2="388" y2="178" marker-end="url(#ah)"/>
+
+      <rect class="bx" x="392" y="152" width="98" height="52" rx="7"/>
+      <text class="t-bx" x="441" y="175">CONFORMED</text>
+      <text class="t-bx" x="441" y="192">TABLE</text>
+
+      <!-- brace -->
+      <path class="brace" d="M 30 218 L 30 230 L 490 230 L 490 218"/>
+      <text class="t-count" x="260" y="252">4 objects to manage</text>
+
+      <!-- pros/cons A -->
+      <text class="t-pro" x="34" y="288">+</text><text class="t-li" x="52" y="288">fine-grained control</text>
+      <text class="t-pro" x="34" y="314">+</text><text class="t-li" x="52" y="314">zero cost when idle</text>
+      <text class="t-con" x="278" y="288">&#8722;</text><text class="t-li" x="296" y="288">more objects</text>
+      <text class="t-con" x="278" y="314">&#8722;</text><text class="t-li" x="296" y="314">manual backfill</text>
+
+      <!-- ============ OPTION B ============ -->
+      <text class="t-opt" x="562" y="80">OPTION B &#183; DYNAMIC TABLE</text>
+      <line class="rule-b" x1="562" y1="90" x2="862" y2="90"/>
+
+      <rect class="bx" x="558" y="152" width="86" height="52" rx="7"/>
+      <text class="t-bx" x="601" y="175">RAW</text>
+      <text class="t-bx" x="601" y="192">TABLE</text>
+
+      <line class="arw" x1="648" y1="178" x2="672" y2="178" marker-end="url(#ah)"/>
+
+      <rect class="bx bx-g" x="676" y="122" width="222" height="112" rx="10"/>
+      <text class="t-bx" x="787" y="147">DYNAMIC TABLE</text>
+      <text class="t-mono" x="787" y="167">TARGET_LAG = 10 min</text>
+      <text class="t-tick" x="700" y="190">&#10003;</text><text class="t-li" x="716" y="190">scheduling</text>
+      <text class="t-tick" x="700" y="209">&#10003;</text><text class="t-li" x="716" y="209">incremental refresh</text>
+      <text class="t-tick" x="700" y="228">&#10003;</text><text class="t-li" x="716" y="228">state</text>
+
+      <line class="arw" x1="902" y1="178" x2="926" y2="178" marker-end="url(#ah)"/>
+      <text class="t-bx" x="1000" y="182">CONFORMED</text>
+
+      <path class="brace" d="M 676 248 L 676 260 L 898 260 L 898 248"/>
+      <text class="t-count" x="787" y="282">1 object</text>
+
+      <text class="t-pro" x="566" y="318">+</text><text class="t-li" x="584" y="318">declarative, one CREATE</text>
+      <text class="t-pro" x="566" y="344">+</text><text class="t-li" x="584" y="344">Snowflake owns refresh</text>
+      <text class="t-pro" x="566" y="370">+</text><text class="t-li" x="584" y="370">auto backfill</text>
+      <text class="t-con" x="566" y="396">&#8722;</text><text class="t-li" x="584" y="396">less timing control</text>
+
+      <!-- ============ BOTTOM ============ -->
+      <text class="t-hint-h" x="30" y="378">decision hint</text>
+      <line class="rule-h" x1="30" y1="384" x2="106" y2="384"/>
+      <text class="t-hint" x="30" y="404">need conditional logic / multi-step?  &#8594;  Stream + Task</text>
+      <text class="t-hint" x="30" y="422">straight transform + join?              &#8594;  Dynamic Table</text>
+
+      <rect class="pill" x="336" y="428" width="300" height="34" rx="8"/>
+      <text class="t-pill" x="486" y="444">BOTH MEET THE</text>
+      <text class="t-pill" x="486" y="457">15-MIN SLA</text>
+
+      <rect class="pill pill-g" x="648" y="428" width="366" height="34" rx="8"/>
+      <text class="t-star" x="668" y="450">&#9733;</text>
+      <text class="t-pill-g" x="836" y="444">OUR PICK &#8594; DYNAMIC TABLE</text>
+      <text class="t-pill-s" x="836" y="457">(transform + join = exactly its sweet spot)</text>
+    </svg>
+    <figcaption>Both patterns were built and run in parallel during the POC.</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h3 style="color:#f59e0b;">Use Stream + Task when…</h3>
+      <ul>
+        <li>Conditional logic or multi-step DAG</li>
+        <li>Needs a stored procedure call</li>
+        <li>Execution must hit an exact window</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:#10b981;">Use Dynamic Table when…</h3>
+      <ul>
+        <li>Transform fits one SELECT</li>
+        <li>Freshness is an SLA, not a schedule</li>
+        <li>You want less to operate</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>My recommendation — Dynamic Table.</strong> Our conformed layer is flatten + cast + join FAA on ICAO hex:
+    a single SELECT. The control Stream + Task buys has nothing to control here. Same 15-min SLA, 4 objects down to 1,
+    backfill and refresh history for free.
+  </div>
+
+  <p style="font-size:.88rem;"><strong>POC observation:</strong> the 509M vs 59M row gap isn't a bug — the Dynamic Table
+  backfilled all history automatically; the streams only saw rows inserted after creation. That gap <em>is</em> the argument.</p>
+</div>
+
+<!-- 7 DEMO -->
+<div class="slide" id="s7">
+  <h2>Demo &amp; Results</h2>
+  <h3>Questions the platform now answers in seconds</h3>
+  <table>
+    <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+    <tbody>
+      <tr><td>Who owns aircraft <code>N350XX</code>?</td><td>PETE MITCHELL AVIATION LLC</td></tr>
+      <tr><td>What make and model is it?</td><td>BOMBARDIER INC · BD-100-1A10</td></tr>
+      <tr><td>How many distinct aircraft did Amazon fly in 2021?</td><td>7</td></tr>
+      <tr><td>FedEx fleet observed in 2022?</td><td>13 aircraft</td></tr>
+      <tr><td>Files loaded for KAPA <code>year=2022</code>?</td><td>77,203 distinct source files</td></tr>
+    </tbody>
+  </table>
+  <h3>Audit-facing views (XSmall warehouse, <code>CAPSTONE_AUDIT_ROLE</code>)</h3>
+  <table>
+    <thead><tr><th>View</th><th>Backed by</th></tr></thead>
+    <tbody>
+      <tr><td><code>ADS_B_KAPA_EXT_VW</code> / <code>ADS_B_KBFI_EXT_VW</code></td><td>External tables — query S3 in place, no load</td></tr>
+      <tr><td><code>AIRCRAFT_FLIGHT_DT_VW</code></td><td>Conformed Dynamic Table — enriched flight data</td></tr>
+      <tr><td><code>AIRCRAFT_FLIGHT_VW</code></td><td>Conformed Stream+Task table — comparison baseline</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><strong>Traceability proven:</strong> every row in every view exposes <code>FILE_NAME</code> and <code>FILE_ROW_NUM</code> — any data point traces back to its exact source file and line.</div>
+</div>
+
+<!-- 8 COST -->
+<div class="slide" id="s8">
+  <h2>Consumption &amp; Cost</h2>
+  <h3>What the POC actually cost</h3>
+  <div class="bar">
+    <div style="width:84%;background:#29B5E8;">LOAD_WH (M) $27.51 — one-time backfill</div>
+    <div style="width:12%;background:#8BC1F7;color:#0f172a;">QUERY $3.83</div>
+    <div style="width:4%;background:#8b5cf6;"></div>
+  </div>
+  <table>
+    <thead><tr><th>Line item</th><th>Size</th><th>Credits</th><th>USD</th></tr></thead>
+    <tbody>
+      <tr><td>CAPSTONE26_LOAD_WH — historical backfill</td><td>Medium</td><td>9.17</td><td>$27.51</td></tr>
+      <tr><td>CAPSTONE26_QUERY_WH — pipeline + queries</td><td>Small</td><td>1.28</td><td>$3.83</td></tr>
+      <tr><td>CAPSTONE_AUDIT_WH — audit reads</td><td>XSmall</td><td>0.12</td><td>$0.35</td></tr>
+      <tr><td>Serverless tasks / Snowpipe</td><td>—</td><td>0.14</td><td>$0.42</td></tr>
+      <tr><td>Storage — 39.8 GB</td><td>—</td><td>—</td><td>$0.89</td></tr>
+      <tr class="tot"><td colspan="2">Total POC</td><td>10.71</td><td>$32.65</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><strong>84% of POC compute was the one-time load.</strong> Steady-state cost is dominated by Dynamic Table refresh.</div>
+  <h3>Projected production run rate</h3>
+  <table>
+    <thead><tr><th>Category</th><th>Monthly</th><th>Annual</th></tr></thead>
+    <tbody>
+      <tr><td>Snowpipe ingestion (serverless, per file)</td><td>$3–5</td><td>$36–60</td></tr>
+      <tr><td>Dynamic Table refresh (10 min lag, Small)</td><td>$8–12</td><td>$96–144</td></tr>
+      <tr><td>Query warehouse — ad-hoc + dashboards</td><td>$5–10</td><td>$60–120</td></tr>
+      <tr><td>FAA monthly refresh (XSmall, &lt;30s)</td><td>$1.50</td><td>$18</td></tr>
+      <tr><td>Storage</td><td>$1–3</td><td>$12–36</td></tr>
+      <tr class="tot"><td>Total</td><td>~$19–32</td><td>~$222–378</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- 9 VALUE + NEXT -->
+<div class="slide" id="s9">
+  <h2>Business Value &amp; Next Steps</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3>Value delivered</h3>
+      <ul>
+        <li><strong>10-minute freshness</strong> on 500M+ records</li>
+        <li><strong>Audit-grade lineage</strong> to source file and row</li>
+        <li><strong>Schema divergence absorbed</strong> — two firmwares, one model</li>
+        <li><strong>Zero-ops</strong> — no servers, schedulers or CDC tooling</li>
+        <li><strong>~$25/month</strong> steady state</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Recommended next steps</h3>
+      <ol>
+        <li>Adopt <strong>Dynamic Tables</strong> as the production pipeline</li>
+        <li>Automate the <strong>FAA monthly refresh</strong> with a Task</li>
+        <li>Add <strong>weather (METAR/TAF) enrichment</strong> using the same join pattern</li>
+        <li>Build a <strong>Streamlit-in-Snowflake</strong> fleet + cost dashboard</li>
+        <li>Apply <strong>retention policies</strong> on RAW to cap storage growth</li>
+        <li>Replace demo <code>AUDIT_USER</code> with <strong>SSO-backed roles</strong></li>
+      </ol>
+    </div>
+  </div>
+  <div class="callout">
+    <strong>Bottom line:</strong> Snowflake delivers a production-ready, near-real-time aviation data pipeline for
+    <strong>under $30/month</strong> with no operational overhead. The POC validated the architecture, both pipeline
+    patterns, and the economics.
+  </div>
+  <div style="margin-top:26px;padding:20px;text-align:center;background:light-dark(#f1f5f9,#16233a);border-radius:10px;">
+    <p style="font-size:1.05rem;font-weight:700;margin:0;">Thank you — questions?</p>
+    <p style="font-size:.82rem;color:light-dark(#64748b,#94a3b8);margin:4px 0 0;">Ranjeeta Pegu · SE Capstone 2026 · ranjeeta.pegu@snowflake.com</p>
+  </div>
+</div>
+
+</div><!-- /stage -->
+
+<div class="ctrl">
+  <button id="prevBtn" disabled>← Previous</button>
+  <span id="counter">1 / 10</span>
+  <button id="nextBtn">Next →</button>
+</div>
+</div><!-- /main -->
+
+<script>
+(function () {
+  var slides = document.querySelectorAll('.slide');
+  var navItems = document.querySelectorAll('#navList li');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var counter = document.getElementById('counter');
+  var stage = document.querySelector('.stage');
+  var current = 0;
+
+  function goTo(idx) {
+    if (idx < 0 || idx >= slides.length || idx === current) return;
+    slides[current].classList.remove('active');
+    navItems[current].classList.remove('active');
+    current = idx;
+    slides[current].classList.add('active');
+    navItems[current].classList.add('active');
+    stage.scrollTop = 0;
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = current === slides.length - 1;
+    counter.textContent = (current + 1) + ' / ' + slides.length;
+  }
+
+  // delegated click on the whole list — robust to markup changes
+  document.getElementById('navList').addEventListener('click', function (e) {
+    var li = e.target.closest('li[data-slide]');
+    if (li) goTo(parseInt(li.getAttribute('data-slide'), 10));
+  });
+
+  prevBtn.addEventListener('click', function () { goTo(current - 1); });
+  nextBtn.addEventListener('click', function () { goTo(current + 1); });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); goTo(current + 1); }
+    if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); goTo(current - 1); }
+  });
+})();
+</script>
+
+</body>
+</html>
